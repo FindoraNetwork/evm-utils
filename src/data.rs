@@ -398,3 +398,67 @@ impl<T: EvmData> EvmData for Vec<T> {
         writer.arrays.push(array);
     }
 }
+
+use ark_bls12_381::{Fr, Bls12_381};
+use ark_marlin::{IndexVerifierKey, Proof};
+use evm::ExitError;
+use ark_poly_commit::marlin_pc::MarlinKZG10;
+use ark_poly::univariate::DensePolynomial;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+
+pub(crate) type MultiPC = MarlinKZG10<Bls12_381, DensePolynomial<Fr>>;
+
+pub struct IndVerifierKey(pub IndexVerifierKey<Fr, MultiPC>);
+
+pub struct Proof1(pub Proof<Fr, MultiPC>);
+
+#[derive(Clone)]
+pub struct InputField(pub Fr);
+
+impl EvmData for IndVerifierKey {
+    fn read(reader: &mut EvmDataReader) -> EvmResult<Self> {
+        let result = IndexVerifierKey::<_, _>::deserialize(reader);
+        let ivk = match result {
+            Ok(data) => data,
+            _ => return Err(ExitError::Other("De-Serialize Error".into())),
+        };
+
+        Ok(IndVerifierKey(ivk))
+    }
+
+    fn write(writer: &mut EvmDataWriter, value: Self) {
+        let _ = value.0.serialize(writer);
+    }
+}
+
+impl EvmData for Proof1 {
+    fn read(reader: &mut EvmDataReader) -> EvmResult<Self> {
+        let result = Proof::<_, _>::deserialize(reader);
+        let proof = match result {
+            Ok(data) => data,
+            _ => return Err(ExitError::Other("De-Serialize Error".into())),
+        };
+
+        Ok(Proof1(proof))
+    }
+
+    fn write(writer: &mut EvmDataWriter, value: Self) {
+        let _ = value.0.serialize(writer);
+    }
+}
+
+impl EvmData for InputField {
+    fn read(reader: &mut EvmDataReader) -> EvmResult<Self> {
+        let result = Fr::deserialize(reader);
+        let fr = match result {
+            Ok(data) => data,
+            _ => return Err(ExitError::Other("De-Serialize Error".into())),
+        };
+
+        Ok(InputField(fr))
+    }
+
+    fn write(writer: &mut EvmDataWriter, value: Self) {
+        let _ = value.0.serialize(writer);
+    }
+}

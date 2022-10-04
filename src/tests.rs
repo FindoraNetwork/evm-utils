@@ -16,6 +16,7 @@
 
 use super::*;
 use ethereum_types::{H256, U256};
+use crate::data::{IndVerifierKey, Proof1, InputField};
 
 fn u256_repeat_byte(byte: u8) -> U256 {
     let value = H256::repeat_byte(byte);
@@ -484,4 +485,137 @@ fn read_multiple_arrays() {
 
     let parsed: Vec<H256> = reader.read().expect("to correctly parse Vec<H256>");
     assert_eq!(array2, parsed);
+}
+
+#[test]
+fn test_ind_verifier_key() {
+    let (ivk, _, _) = get_proof_data();
+    let writer_output = EvmDataWriter::new().write(IndVerifierKey(ivk)).build();
+
+    let mut reader = EvmDataReader::new(&writer_output);
+    let parsed: IndVerifierKey = reader
+        .read()
+        .expect("to correctly parse IndexVerifierKey<Fr, MultiPC>");
+
+    let second_output = EvmDataWriter::new().write(parsed).build();
+
+    assert_eq!(writer_output, second_output);
+}
+
+#[test]
+fn test_proof_serialization() {
+    let (_, proof, _) = get_proof_data();
+    let writer_output = EvmDataWriter::new().write(Proof1(proof)).build();
+
+    let mut reader = EvmDataReader::new(&writer_output);
+    let parsed: Proof1 = reader
+        .read()
+        .expect("to correctly parse Proof<Fr, MultiPC>");
+
+    let second_output = EvmDataWriter::new().write(parsed).build();
+
+    assert_eq!(writer_output, second_output);
+}
+
+#[test]
+fn test_field_serialization() {
+    let (_, _, field_arr) = get_proof_data();
+    let writer_output = EvmDataWriter::new().write(field_arr.to_vec()).build();
+
+    let mut reader = EvmDataReader::new(&writer_output);
+    let parsed: Vec<InputField> = reader
+        .read()
+        .expect("to correctly parse Proof<Fr, MultiPC>");
+
+    let second_output = EvmDataWriter::new().write(parsed).build();
+
+    assert_eq!(writer_output, second_output);
+}
+
+use ark_ff::Field;
+use ark_relations::{
+    lc,
+    r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError},
+};
+use ark_marlin::{IndexVerifierKey, SimpleHashFiatShamirRng, Marlin, Proof};
+use ark_bls12_381::{Fr, Bls12_381};
+use ark_poly::univariate::DensePolynomial;
+use ark_poly_commit::marlin_pc::MarlinKZG10;
+use ark_ff::UniformRand;
+use ark_std::ops::MulAssign;
+use blake2::Blake2s;
+use rand_chacha::ChaChaRng;
+
+pub(crate) type MultiPC = MarlinKZG10<Bls12_381, DensePolynomial<Fr>>;
+type FS = SimpleHashFiatShamirRng<Blake2s, ChaChaRng>;
+type MarlinInst = Marlin<Fr, MultiPC, FS>;
+
+#[derive(Copy, Clone)]
+struct Circuit<F: Field> {
+    a: Option<F>,
+    b: Option<F>,
+    num_constraints: usize,
+    num_variables: usize,
+}
+
+impl<ConstraintF: Field> ConstraintSynthesizer<ConstraintF> for Circuit<ConstraintF> {
+    fn generate_constraints(
+        self,
+        cs: ConstraintSystemRef<ConstraintF>,
+    ) -> Result<(), SynthesisError> {
+        let a = cs.new_witness_variable(|| self.a.ok_or(SynthesisError::AssignmentMissing))?;
+        let b = cs.new_witness_variable(|| self.b.ok_or(SynthesisError::AssignmentMissing))?;
+        let c = cs.new_input_variable(|| {
+            let mut a = self.a.ok_or(SynthesisError::AssignmentMissing)?;
+            let b = self.b.ok_or(SynthesisError::AssignmentMissing)?;
+
+            a.mul_assign(&b);
+            Ok(a)
+        })?;
+        let d = cs.new_input_variable(|| {
+            let mut a = self.a.ok_or(SynthesisError::AssignmentMissing)?;
+            let b = self.b.ok_or(SynthesisError::AssignmentMissing)?;
+
+            a.mul_assign(&b);
+            a.mul_assign(&b);
+            Ok(a)
+        })?;
+
+        for _ in 0..(self.num_variables - 3) {
+            let _ = cs.new_witness_variable(|| self.a.ok_or(SynthesisError::AssignmentMissing))?;
+        }
+
+        for _ in 0..(self.num_constraints - 1) {
+            cs.enforce_constraint(lc!() + a, lc!() + b, lc!() + c)?;
+        }
+        cs.enforce_constraint(lc!() + c, lc!() + b, lc!() + d)?;
+
+        Ok(())
+    }
+}
+
+pub fn get_proof_data() -> (IndexVerifierKey<Fr, MultiPC>, Proof<Fr, MultiPC>, [InputField; 2]) {
+    let rng = &mut ark_std::test_rng();
+    let universal_srs = MarlinInst::universal_setup(100, 25, 300, rng).unwrap();
+
+    let a = Fr::rand(rng);
+    let b = Fr::rand(rng);
+    let mut c = a;
+    c.mul_assign(&b);
+    let mut d = c;
+    d.mul_assign(&b);
+
+    let inputs: [InputField; 2] = [InputField(c), InputField(d)];
+
+    let circ = Circuit {
+        a: Some(a),
+        b: Some(b),
+        num_constraints: 25,
+        num_variables: 25,
+    };
+
+    let (index_pk, index_vk) = MarlinInst::index(&universal_srs, circ.clone()).unwrap();
+    let proof = MarlinInst::prove(&index_pk, circ, rng).unwrap();
+
+    (index_vk, proof, inputs)
 }
